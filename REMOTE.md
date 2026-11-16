@@ -64,4 +64,15 @@ A live run on Herdr Desktop 0.1.16 with devbox core 0.1.21 rendered a disposable
 
 The remote tests exercise actual viewer load/follow/close methods with host APIs replaced, including serialized navigation, stale results, machine routing, remote-resource guards, errors and local regression. Live mouse-click navigation was not automated: macOS denied Apple events to System Events (`-1743`); no permissions were changed. A direct remote second-document read and unit-tested navigation do not establish that an actual UI click was tested.
 
-Reader-only screenshots are in `evidence/`; full-window captures containing unrelated terminal sessions were kept out of the repository.
+Reader-only screenshots are in `evidence/`; full-window captures containing unrelated terminal sessions were kept out of the repository. The live negative test requested `/tmp/herdr-md-local-test.md` on devbox while that file existed on the Mac: the viewer showed `File not found on devbox`, not Mac content (`evidence/remote-no-local-fallback.png`).
+
+### Independent review and follow-up verification
+
+Two clean-context read-only reviewers examined the committed change against upstream `fc5fcad909ad57a82210c20be7cedc72f83faeca`:
+
+- `/markdown-standards-review`, session `01a1e674-02c6-72ce-b7c3-7e3082ac6052`: correctness/lifecycle/standards.
+- `/markdown-spec-review`, session `01a1e674-2182-72ce-b7c3-7e32f2607c96`: spec compliance and remote resource boundaries.
+
+Both found a real pipeline-ordering bug: inline math conversion could recreate image syntax after filtering. A regression test first reproduced unsafe renderer input; filtering now runs after all inline transformations, directly before the native renderer. The standards review also identified an inherited check-time `mkdir` side effect; `watchNotes` now skips checks, with regression coverage. No actual native file read from the unsafe input was demonstrated.
+
+After those fixes, the full Node runner passes **23/23** tests and Python CLI routing passes **4/4**. The installed copy was resynced and `herdr-app check` passed without its earlier executed-child-process warning. Final follow-up review receipts are recorded in `REVIEW.md`.

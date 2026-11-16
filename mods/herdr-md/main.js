@@ -9,7 +9,7 @@
 // them and scrolls to `focus` whenever `seq` changes.
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView, InputState, Input } from "gpui-base";
-import { props, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, focused, run } from "herdr";
+import { props, checking, readTextFile, watchFolder, exec, theme, settings, home, appHome, nextCommand, panes, focused, run } from "herdr";
 import { marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX } from "./lex.js";
 import { inlineMath } from "./tex.js";
 import { hash as bhash, diffBlocks, slug, labelOf, inlineRoles, alertOf, ALERTS, nextNumberMode, ordinals, gutterLabel, nextLook, nextMotion, parseCursorPref, cursorParts, LOOK_NAMES } from "./doc.js";
@@ -436,7 +436,7 @@ export default class Md extends View {
 
   // Runs for an empty viewer too: it starts reading notes once a file is picked.
   watchNotes(cx) {
-    if (this.remote) return;
+    if (this.remote || checking()) return;
     cx.spawn(async cx => {
       await exec("mkdir", ["-p", NOTES()]);
       for (;;) {
@@ -813,9 +813,11 @@ export default class Md extends View {
   }
 
   inline(id, md) {
-    if (this.remote) md = remoteInline(md);
     const pv = this.pvMode;   // a preview's links go nowhere (they'd move the viewer)
-    return TextView.markdown(id, inlineMath(inlineRoles(md, pv ? new Map() : this.labels))).selectable(!pv)
+    md = inlineMath(inlineRoles(md, pv ? new Map() : this.labels));
+    // Transformations can create fresh image syntax; sanitize the final input.
+    if (this.remote) md = remoteInline(md);
+    return TextView.markdown(id, md).selectable(!pv)
       .on_link_click((url, cx) => { if (!pv) this.follow(url, cx); });
   }
 

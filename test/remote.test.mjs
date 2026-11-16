@@ -5,16 +5,19 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import * as remote from "../mods/herdr-md/remote.js";
 import { marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX } from "../mods/herdr-md/lex.js";
-import { hash as bhash } from "../mods/herdr-md/doc.js";
+import { hash as bhash, inlineRoles } from "../mods/herdr-md/doc.js";
+import { inlineMath } from "../mods/herdr-md/tex.js";
 import { diffBlocks } from "../mods/herdr-md/doc.js";
 
 const source = readFileSync(new URL("../mods/herdr-md/main.js", import.meta.url), "utf8")
   .replace(/import\s[\s\S]*?from\s+["'][^"']+["'];/g, "")
   .replace("export default class Md", "globalThis.Md = class Md");
 
-function harness(read, isRemote = true) {
-  const calls = [], timers = [], tasks = [], execs = [];
-  const host = { ...remote, marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX, bhash, diffBlocks, View: class {}, home: () => "/MacHome",
+function harness(read, isRemote = true, check = false) {
+  const calls = [], timers = [], tasks = [], execs = [], renderInputs = [];
+  const host = { ...remote, marked, splitChunks, capSource, refDefs, lexChunk, blocks, LEX_MAX, bhash, diffBlocks, inlineRoles, inlineMath,
+    checking: () => check, TextView: { markdown(id, md) { renderInputs.push(md); return { selectable() { return this; }, on_link_click() { return this; } }; } },
+    View: class {}, home: () => "/MacHome",
     props: () => ({}), readTextFile: async (file, options) => { calls.push({ file, options }); return read(file); },
     exec: async (...args) => { execs.push(args); return { code: 0, stdout: "" }; },
     console, codeBlock: () => null };
@@ -23,14 +26,14 @@ function harness(read, isRemote = true) {
     file: "/docs/README.md", on: isRemote ? "devbox" : null, remote: isRemote, sourceError: null,
     remoteBusy: false, remoteAgain: false, remoteTick: 0, remoteText: null, closed: false,
     loadGen: 0, watchGen: 0, shown: null, blocks: [], codes: [], seq: 0, cur: 0,
-    history: [], future: [], refs: [], error: null, notes: { highlights: [] }, folded: new Set(), pendingAnchor: null,
+    history: [], future: [], refs: [], error: null, notes: { highlights: [] }, folded: new Set(), pendingAnchor: null, labels: new Map(),
     scroll: { scrollToTop() {} }, setBlocks(blocks) { this.blocks = blocks; this.adoptions = (this.adoptions ?? 0) + 1; },
     resolve() {}, applyFocus() {}, prepare() {}, reaim() {}, figTheme() {}, loadImages() { throw Error("remote asset access"); },
   });
   const cx = { notify() {}, spawn(fn) { const task = fn(cx); tasks.push(task); return task; },
     timer: { after(ms, fn) { timers.push({ ms, fn }); } } };
   const settle = async () => { for (let i = 0; i < tasks.length; i++) await tasks[i]; };
-  return { viewer, cx, calls, timers, tasks, execs, settle };
+  return { viewer, cx, calls, timers, tasks, execs, settle, renderInputs };
 }
 
 test("remote source and links reject local schemes and invalid paths", () => {
@@ -49,6 +52,22 @@ test("inline images never reach the host renderer, including nested prose and HT
     assert.doesNotMatch(safe, /!\[|<img/i);
     assert.doesNotMatch(safe, /private.png|x.png/);
   }
+});
+
+test("actual inline pipeline filters images after math/role expansion", () => {
+  const h = harness(() => null);
+  for (const md of ["Formula: $!{}[alt](/Users/sid/private.png)$", String.raw`$!\[alt](/Users/sid/private.png)$`, "before ![alt](/Mac/private.png) after"]) {
+    h.viewer.inline("test", md);
+    const rendered = h.renderInputs.at(-1);
+    assert.match(rendered, /remote media disabled/);
+    assert.doesNotMatch(rendered, /!\[|private\.png/);
+  }
+});
+
+test("checking does not create a notes directory or launch watchers", () => {
+  const h = harness(() => null, false, true);
+  h.viewer.watchNotes(h.cx);
+  assert.equal(h.execs.length, 0); assert.equal(h.tasks.length, 0);
 });
 
 test("remote load uses machine routing, skips unchanged content, then refreshes", async () => {
