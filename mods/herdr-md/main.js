@@ -138,9 +138,15 @@ const solid = tokens => (tokens ?? []).map(t => t.type === "codespan" ? t.raw.re
   : t.tokens ? solid(t.tokens) : t.text ?? t.raw ?? "").join("");
 const squash = s => s.replace(/\s+/g, " ").trim().toLowerCase();
 
+import { REMOTE_POLL_MS, REMOTE_LIMITS, remoteSourceError, remoteLink, remoteInline } from "./remote.js";
+
 export default class Md extends View {
   init(_props, cx) {
     this.file = props()?.file ?? null;
+    this.on = props()?.on ?? null;
+    this.remote = this.on !== null;
+    this.sourceError = this.remote ? remoteSourceError(this.file, this.on) : null;
+    this.remoteBusy = false; this.remoteAgain = false; this.remoteTick = 0; this.remoteText = null; this.closed = false;
     this.blocks = []; this.error = null; this.codes = []; this.images = {}; this.figs = {}; this.videos = {}; this.videoList = []; this.born = Date.now() * 1e6; this.videoSeq = null; this.pendingVideo = null;
     this.noteAlpha = 1; this.typed = Infinity;
     this.offset = 0; this.motion = 0; this.heights = []; this.loadGen = 0; this.shown = null; this.viewH = 0; this.contentH = 0; this.colW = MAX_W - PAD * 2;
@@ -215,7 +221,13 @@ export default class Md extends View {
   // the whole document (change marks, agent highlights, anchors, figures) waits
   // for the last chunk. A newer load (file changed, navigated) stops this one.
   load(cx) {
-    if (!this.file) return;   // the empty state (render) points at ctrl-p
+    if (this.closed) return;
+    if (this.sourceError) { this.error = this.sourceError; return cx.notify(); }
+    if (!this.file) return;
+    // A navigation invalidates the in-flight result but waits for its read to
+    // finish. Polls never overlap, even across navigation or a slow connection.
+    if (this.remote && this.remoteBusy) { this.loadGen++; this.remoteAgain = true; return; }
+    if (this.remote) { this.remoteBusy = true; this.remoteTick++; }
     const gen = ++this.loadGen, file = this.file, codes = [];
     const stale = () => gen !== this.loadGen;
     // This load's code editors replace the old ones when its blocks go on screen.
@@ -223,17 +235,20 @@ export default class Md extends View {
     cx.spawn(async cx => {
       try {
         let text = null, cap = null;
-        try { text = await readTextFile(file); }
+        const options = this.remote ? { on: this.on } : undefined;
+        try { text = await readTextFile(file, options); }
         catch (e) {
           // Herdr won't read a text file over 1 MiB: read its start instead.
           if (!/exceeds/i.test(String(e))) throw e;
-          const [head, wc] = await Promise.all([exec("head", ["-c", String(LEX_MAX + 4096), file]), exec("wc", ["-l", file])]);
+          const [head, wc] = await Promise.all([exec("head", ["-c", String(LEX_MAX + 4096), file], options), exec("wc", ["-l", file], options)]);
           if (head.code !== 0) throw e;
           text = head.stdout;
           cap = { ...capSource(text, Math.min(LEX_MAX, text.length - 4096)), total: parseInt(wc.stdout, 10) || 0 };
         }
         if (stale()) return;
-        if (text === null) { this.error = "File not found"; return cx.notify(); }
+        if (text === null) { this.error = `File not found${this.remote ? ` on ${this.on}` : ""}: ${file}`; return cx.notify(); }
+        if (this.remote && this.shown === file && text === this.remoteText && !this.error) return;
+        this.error = null;
         cap ??= capSource(text);
         const chunks = splitChunks(cap.text);
         const links = chunks.length > 1 ? refDefs(cap.text) : null;
@@ -251,6 +266,7 @@ export default class Md extends View {
         if (cap.cut) list.push({ type: "notice", raw: "", from: cap.lines, to: cap.lines,
           text: `Showing the first ${cap.lines.toLocaleString()} lines of ${cap.total.toLocaleString()}: the file is too long to show whole. Open it in an editor for the rest.` });
         adopt(); this.src = text; this.lines = cap.total; this.setBlocks(list); this.shown = file;
+        if (this.remote) this.remoteText = text;
         this.highlightAimed = false; this.applyFocus();
         await this.markChanges();
         if (stale()) return;
@@ -258,15 +274,32 @@ export default class Md extends View {
         else if (this.restore) { this.cursor = Math.min(this.restore.cursor, this.blocks.length - 1); this.aimAt(this.cursor); this.restore = null; }
         this.reaim();
         cx.notify();
+        if (this.remote) return; // Never resolve document assets on the Mac.
         await this.loadImages(tokens);
         cx.notify();
         await this.loadVideos(tokens, cx);
         cx.notify();
         this.figTokens = tokens; this.figSig = this.figTheme();
         await this.renderFigures(tokens);
-      } catch (e) { if (!stale()) this.error = String(e); }
-      cx.notify();
+      } catch (e) { if (!stale()) this.error = `${this.remote ? `${this.on}: ` : ""}${String(e)}`; }
+      finally {
+        if (this.remote) {
+          this.remoteBusy = false;
+          if (!this.closed) {
+            const tick = ++this.remoteTick, delay = this.remoteAgain ? 1 : REMOTE_POLL_MS;
+            this.remoteAgain = false;
+            cx.timer.after(delay, cx => { if (!this.closed && tick === this.remoteTick) this.load(cx); });
+          }
+        }
+        if (!this.closed) cx.notify();
+      }
     });
+  }
+
+  close() {
+    this.closed = true; this.loadGen++; this.watchGen++; this.remoteTick++;
+    this.codes.forEach(c => c.release?.());
+    // Herdr cancels this copy's tasks/timers on close, including remote reads.
   }
 
   // Put a document's blocks on screen. Keep measured heights: a reloaded block
@@ -283,7 +316,7 @@ export default class Md extends View {
 
   // Reload when the file changes on disk.
   watch(cx) {
-    if (!this.file) return;
+    if (!this.file || this.remote) return;
     const gen = ++this.watchGen, dir = dirname(this.file);
     cx.spawn(async cx => {
       while (gen === this.watchGen) {
@@ -325,6 +358,12 @@ export default class Md extends View {
   // pane, or in any viewer before: hashes are kept in ~/.cache/herdr-md/seen-*).
   async markChanges() {
     const hashes = this.blocks.map(b => bhash(b.raw.trim()));
+    if (this.remote) {
+      // In-memory only: remote paths must not collide with local annotations.
+      const { changed, removed } = diffBlocks(this.lastHashes ?? [], hashes);
+      this.changed = this.lastHashes ? changed : new Set(); this.removed = removed; this.lastHashes = hashes;
+      return;
+    }
     const seen = `${NOTES()}/seen-${noteKey(this.file)}`;
     let prev = this.lastHashes;
     if (!prev) { try { prev = JSON.parse(await readTextFile(seen) ?? "null"); } catch { prev = null; } }
@@ -350,7 +389,8 @@ export default class Md extends View {
 
   // ---- links ----
   jumpAnchor(frag) {
-    const f = decodeURIComponent(frag);
+    let f;
+    try { f = decodeURIComponent(frag); } catch { this.flash = "Invalid link fragment"; return; }
     const i = f.startsWith("label:") ? this.labels.get(f.slice(6))?.block : this.anchors.get(f) ?? this.anchors.get(slug(f));
     if (i !== undefined) { this.cursor = i; this.aimAt(i); }
   }
@@ -365,6 +405,11 @@ export default class Md extends View {
     // files are only revealed in Finder; other schemes are refused.
     if (/^(https?|mailto):/i.test(url)) { exec("open", [url]); return; }
     if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !url.startsWith("file:")) { this.flash = `not opening ${url.split(":")[0]}: links`; return cx.notify(); }
+    if (this.remote) {
+      try { const target = remoteLink(this.file, url); this.navigate(target.file, target.fragment, cx, true); }
+      catch (e) { this.flash = String(e); cx.notify(); }
+      return;
+    }
     const [path, frag = null] = url.replace(/^file:\/\//, "").split("#");
     const abs = path.startsWith("/") ? path : `${dirname(this.file)}/${decodeURIComponent(path)}`.replace(/\/\.\//g, "/");
     if (/\.(md|markdown|mdx)$/i.test(abs)) this.navigate(abs, frag, cx, true);
@@ -375,6 +420,8 @@ export default class Md extends View {
     if (push && this.file) this.history.push({ file: this.file, cursor: this.cursor });
     if (file === this.file) { if (frag) this.jumpAnchor(frag); return cx.notify(); }
     this.file = file.replace(/\/[^/]+\/\.\.\//g, "/"); this.remember(this.file);
+    this.remoteText = null; this.lastHashes = null; this.blocks = []; this.shown = null; this.error = null;
+    this.images = {}; this.figs = {}; this.videos = {}; this.videoList = []; this.figTokens = null;
     this.folded.clear(); this.offset = 0; this.motion = 0; this.cursor = 0; this.anchor = null;   // heights kept: see load()
     this.lastHashes = null; this.changed = new Set(); this.removed = new Map(); this.seq = null; this.aim = null;
     this.pendingAnchor = frag;
@@ -389,6 +436,7 @@ export default class Md extends View {
 
   // Runs for an empty viewer too: it starts reading notes once a file is picked.
   watchNotes(cx) {
+    if (this.remote) return;
     cx.spawn(async cx => {
       await exec("mkdir", ["-p", NOTES()]);
       for (;;) {
@@ -399,7 +447,7 @@ export default class Md extends View {
   }
 
   async readNotes(cx) {
-    if (!this.file) return;
+    if (!this.file || this.remote) return;
     let n = null;
     try { n = JSON.parse(await readTextFile(`${NOTES()}/${noteKey(this.file)}`) ?? "null"); } catch {}
     this.notes = n && Array.isArray(n.highlights) ? n : { highlights: [] };
@@ -727,10 +775,12 @@ export default class Md extends View {
   // Run the batch renderer, installing its npm packages on first use
   // (MathJax and mermaid-cli; Chrome itself is not downloaded).
   async runRenderer(jobs) {
+    if (this.remote) throw new Error("Remote diagrams are disabled.");
     const dir = `${appHome()}/mods/${MOD}/render`;
     if (!this.deps) {
       const has = await exec("test", ["-d", `${dir}/node_modules/mathjax-full`]);
       if (has.code !== 0) {
+        if (props()?.installDiagramDeps !== true) throw new Error("Diagram packages not installed; install them explicitly or opt in with installDiagramDeps: true.");
         const i = await exec("sh", ["-c", 'cd "$1" && PUPPETEER_SKIP_DOWNLOAD=1 npm install --no-audit --no-fund --silent', "install", dir]);
         if (i.code !== 0) throw new Error(`npm install failed (Node.js and npm are needed): ${(i.stderr || "").slice(0, 160)}`);
       }
@@ -740,6 +790,8 @@ export default class Md extends View {
   }
 
   figure(tok, id, t) {
+    if (this.remote) return v_flex().my(8).p(12).rounded(6).bg(t.surface).text_color(t.dim)
+      .child("Remote diagram rendering disabled — source:").child(tok.text);
     // A theme switch back to a look already rendered shows that image at once,
     // without waiting a frame for renderFigures to repoint tok.fig.
     if (tok.liveSig !== this.figSig) { tok.liveSig = this.figSig; tok.liveKey = this.figKey(tok); }   // hashed once per theme, not per frame
@@ -761,12 +813,15 @@ export default class Md extends View {
   }
 
   inline(id, md) {
+    if (this.remote) md = remoteInline(md);
     const pv = this.pvMode;   // a preview's links go nowhere (they'd move the viewer)
     return TextView.markdown(id, inlineMath(inlineRoles(md, pv ? new Map() : this.labels))).selectable(!pv)
       .on_link_click((url, cx) => { if (!pv) this.follow(url, cx); });
   }
 
   picture(tok, id, t) {
+    if (this.remote) return div().my(6).px(12).py(8).rounded(6).bg(t.surface).text_color(t.dim).text_size(13)
+      .child(`${isVideo(tok.href) ? "▶" : "🖼"} ${tok.text || tok.href} (remote media disabled; no Mac file read)`);
     // In the picker's preview: a light placeholder (images load when the file opens).
     if (tok.pv) return div().my(6).px(12).py(6).rounded(6).bg(t.surface).text_color(t.dim).text_size(12)
       .child(`${isVideo(tok.href) ? "▶" : "🖼"}  ${tok.text || tok.href}`);
@@ -1141,7 +1196,7 @@ export default class Md extends View {
 
   // Newest first in ~/.cache/herdr-md/recent.json (read by the picker and `mdh pick`).
   async remember(file) {
-    if (!file) return;
+    if (!file || this.remote) return;
     let list = [];
     try { list = parseRecent(await readTextFile(RECENT())); } catch {}
     if (list[0] === file) return;
@@ -1150,6 +1205,7 @@ export default class Md extends View {
   }
 
   openPicker(cx) {
+    if (this.remote) { this.flash = "Remote picker disabled — open a remote Markdown path or follow a Markdown link"; return cx.notify(); }
     if (this.pick) return;
     this.outline = false; if (this.help) this.help = false; this.helpIn = 0;
     this.pick = { query: "", rows: [], sel: 0, top: 0, pvY: 0 }; this.pickIn = 0;
@@ -1575,6 +1631,7 @@ export default class Md extends View {
 
   // Pin the selection for Claude: `mdh sel` prints it.
   share() {
+    if (this.remote) { this.flash = "Remote agent annotations/pins disabled; y still copies Markdown"; return; }
     const sel = this.selection();
     this.picked = this.range();
     exec("sh", ["-c", 'mkdir -p "$1" && printf %s "$2" > "$1/selection.json"', "share", NOTES(), JSON.stringify({ ...sel, at: new Date().toISOString() })]);
@@ -1658,7 +1715,7 @@ export default class Md extends View {
       case "escape":
         if (this.anchor !== null) this.anchor = null;
         else if (this.searching) return this.closeSearch(cx);
-        else { this.picked = null; exec("rm", ["-f", `${NOTES()}/selection.json`]); }
+        else { this.picked = null; if (!this.remote) exec("rm", ["-f", `${NOTES()}/selection.json`]); }
         return cx.notify();
       case "#": this.numbers = nextNumberMode(this.numbers); this.flash = `line numbers: ${this.numbers}`; return cx.notify();
       case "C": this.look = nextLook(this.look); this.flash = `cursor: ${LOOK_NAMES[this.look]} · C next look · B motion`; this.saveCursor(); return cx.notify();
@@ -1738,11 +1795,12 @@ export default class Md extends View {
 
   // Top: where you are. The file (home shortened), and a crumb back after a link.
   headerBar(t) {
-    const path = (this.file ?? "").replace(home(), "~"), name = path.split("/").pop(), dir = path.slice(0, path.length - name.length);
+    const path = this.remote ? String(this.file ?? "") : (this.file ?? "").replace(home(), "~"), name = path.split("/").pop(), dir = path.slice(0, path.length - name.length);
     const prev = this.history.length ? this.history[this.history.length - 1].file.split("/").pop() : null;
     return h_flex().h(30).flex_none().px(14).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
       .when(Boolean(prev), el => el.child(div().id("md-back").px(6).rounded(4).cursor_pointer().text_color(t.accent).hover(s => s.bg(t.hover))
         .on_click((_e, cx) => this.back(cx)).child(`← ${prev}`)))
+      .when(this.remote, el => el.child(div().text_color(t.accent).child(`REMOTE · ${this.on}`)))
       .child(h_flex().flex_1().min_w(0).items_center().child(div().truncate().text_color(t.dim).child(dir)).child(div().flex_none().text_color(t.foreground).font_semibold().child(name)))
       .when(this.changed.size > 0, el => el.child(div().px(8).rounded(4).bg(t.ansi2 + "22").text_color(t.ansi2).child(`${this.changed.size} changed`)));
   }
@@ -1756,7 +1814,7 @@ export default class Md extends View {
     return h_flex().h(24).flex_none().px(10).gap(10).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.5).font_family(BODY())
       .child(div().px(6).rounded(3).font_semibold().bg(mode === "NORMAL" ? t.surface : t.accent).text_color(mode === "NORMAL" ? t.muted : t.accent_foreground).child(mode))
       .when(Boolean(this.pending || this.count), el => el.child(div().text_color(t.dim).child(this.count + this.pending)))
-      .child(div().flex_1().min_w(0).truncate().text_color(t.ansi2).child(this.flash ?? ""))
+      .child(div().flex_1().min_w(0).truncate().text_color(t.ansi2).child(this.flash ?? (this.remote ? REMOTE_LIMITS : "")))
       .when(Boolean(secName), el => el.child(div().max_w(220).truncate().text_color(t.dim).child(`§ ${secName}`)))
       .when(Boolean(b), el => el.child(div().text_color(t.muted).child(`L${b.from}/${lines}`)))
       .child(div().w(36).text_right().text_color(t.muted).child(pct <= 0 ? "Top" : pct >= 100 ? "Bot" : `${pct}%`));

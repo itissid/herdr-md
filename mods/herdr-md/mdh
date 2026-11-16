@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """mdh: drive the Herdr md viewer from a shell (built for Claude).
 
-  mdh open FILE [--down]                       open FILE in a viewer pane beside the focused pane
+  mdh open FILE [--on MACHINE] [--pane ID] [--down]
+                                              open beside a pane (run this CLI on the Mac)
+                                              remote FILE must be an absolute POSIX path
   mdh hl FILE --lines 40-52 [--note TEXT]      highlight source lines (replaces existing highlights)
   mdh hl FILE --text "a quote" [--note TEXT]   highlight the block containing a quote
         [--color yellow|green|red|blue|purple|cyan] [--add]  (--add keeps earlier highlights)
@@ -22,7 +24,7 @@ Anywhere in Herdr: cmd-shift-o opens a viewer straight into the picker (a keys.j
 Viewer keys: ctrl-p find a file (fuzzy, with preview), j/k move the cursor, V visual select, y copy, p pin for Claude, Enter fold/follow/zoom/play,
 O open a video in QuickTime, za fold, / search, n/N next match or highlight, # line numbers, ? key help, q close.
 """
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, posixpath, re, subprocess, sys, time
 
 DIR = os.path.expanduser("~/.cache/herdr-md")
 
@@ -53,6 +55,8 @@ def main():
     p = argparse.ArgumentParser(prog="mdh", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("open"); o.add_argument("file"); o.add_argument("--down", action="store_true")
+    o.add_argument("--on", help="read from a connected Herdr machine (Mac-side invocation)")
+    o.add_argument("--pane", help="explicit source pane ID, including machine/ prefix")
     h = sub.add_parser("hl"); h.add_argument("file")
     h.add_argument("--lines"); h.add_argument("--text"); h.add_argument("--note")
     h.add_argument("--color", default="yellow"); h.add_argument("--add", action="store_true")
@@ -89,12 +93,22 @@ def main():
         except OSError:
             sys.exit("mdh: nothing pinned (in the viewer: V, move, p)")
         return
-    path = os.path.abspath(os.path.expanduser(a.file))
+    remote = a.cmd == "open" and a.on is not None
+    if remote:
+        if not a.on.strip() or not a.file.startswith("/") or any(c in a.file for c in "\0\r\n"):
+            sys.exit("mdh: remote open needs --on MACHINE and an absolute POSIX path")
+        path = posixpath.normpath(a.file)
+    else:
+        path = os.path.abspath(os.path.expanduser(a.file))
 
     if a.cmd == "open":
-        if not os.path.isfile(path):
+        if not remote and not os.path.isfile(path):
             sys.exit(f"mdh: no such file: {path}")
         args = {"direction": "down" if a.down else "right", "mod": "herdr-md", "props": {"file": path}}
+        if remote:
+            args["props"]["on"] = a.on
+        if a.pane:
+            args["pane"] = a.pane
         r = subprocess.run(["herdr-app", "do", "pane.split", json.dumps(args)], capture_output=True, text=True)
         sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); sys.exit(r.returncode)
 
