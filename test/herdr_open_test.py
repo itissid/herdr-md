@@ -123,6 +123,11 @@ class FakeCore:
                                 continue
                             self.value = request["params"]["value"]
                             self.version += 1
+                            if self.mode in ("lost-ack-removed", "lost-ack-nocommit") and self.sets == 1:
+                                self.value = document()
+                                self.version = 3 if self.mode == "lost-ack-removed" else 1
+                                stream.close()
+                                break
                             if self.mode == "ambiguous" and self.sets == 1:
                                 stream.close()
                                 break  # Commit happened, response lost. Same op must be found.
@@ -273,6 +278,14 @@ class ProtocolTests(unittest.TestCase):
             self.assertTrue(result["reused"])
             self.assertEqual(fake.sets, 1)
             self.assertEqual(len(root(fake.value)["children"]), 3)
+
+    def test_unknown_write_outcome_absent_pane_never_retries_mutation(self):
+        for mode in ("lost-ack-removed", "lost-ack-nocommit"):
+            with self.subTest(mode=mode), FakeCore(mode) as fake:
+                with self.assertRaisesRegex(h.OpenError, "Unknown write outcome.*refusing recreation"):
+                    fake.open()
+                self.assertEqual(fake.sets, 1)
+                self.assertEqual(fake.value, document())
 
     def test_non_conflict_rejection_is_not_retried(self):
         with FakeCore("reject") as fake:

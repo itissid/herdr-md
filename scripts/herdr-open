@@ -265,6 +265,7 @@ def plan_open(value, path, on, terminal, operation_id, new_tab=False):
 def open_document(socket_path, terminal, path, on, operation_id, new_tab=False, retries=3, timeout=3, client_factory=Core):
     last_error = None
     acknowledged = False
+    uncertain_write = False
     for _ in range(retries + 1):
         try:
             with client_factory(socket_path, timeout) as core:
@@ -278,7 +279,13 @@ def open_document(socket_path, terminal, path, on, operation_id, new_tab=False, 
                 if not result["reused"]:
                     if acknowledged:
                         raise OpenError("Acknowledged operation is absent after retry; refusing recreation")
-                    core.rpc("doc.set", {"name": DOC_NAME, "version": snapshot["version"], "value": updated})
+                    if uncertain_write:
+                        raise OpenError("Unknown write outcome and operation absent; inspect state, refusing recreation")
+                    try:
+                        core.rpc("doc.set", {"name": DOC_NAME, "version": snapshot["version"], "value": updated})
+                    except TransportError:
+                        uncertain_write = True
+                        raise
                     acknowledged = True
                     verified = core.rpc("doc.get", {"name": DOC_NAME})
                     if not isinstance(verified, dict) or type(verified.get("version")) is not int:
@@ -299,7 +306,8 @@ def open_document(socket_path, terminal, path, on, operation_id, new_tab=False, 
             # Same ID on every local-socket retry: an accepted-but-lost response
             # is found on the next read rather than creating a duplicate pane.
             last_error = error
-    raise OpenError("Bounded local-core attempts exhausted: %s. Retry with --operation-id %s" % (last_error, operation_id))
+    detail = " Unknown write outcome; inspect state before any explicit retry." if uncertain_write else ""
+    raise OpenError("Bounded local-core attempts exhausted: %s.%s Operation ID: %s" % (last_error, detail, operation_id))
 
 
 def main(argv=None):

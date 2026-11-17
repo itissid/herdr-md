@@ -70,13 +70,13 @@ There is no stable semantic `pane.create` RPC in the inspected core. `doc.get` /
 
 Every retry rereads the latest document and reapplies just this operation; the helper does not restore an old snapshot over concurrent edits. Exact core `error.data.kind == "conflict"` triggers bounded CAS retry (same numeric error code also means other failures). Other rejected states fail without retrying the mutation. Defaults: three retries, three seconds per local-core request; both bounded by CLI validation. Response/document byte limits are enforced.
 
-One UUID identifies the pane and is kept across ambiguous response retries. If a write was accepted but its reply was lost, the next read finds the same pane rather than inserting another. An explicit repeat can reuse the printed ID:
+One UUID identifies the pane and is kept across local-socket retries. If a write reply is lost, the next read may confirm the SAME pane and return success. **If that pane is absent after an uncertain write, the helper stops without another mutation**: it cannot distinguish non-commit from commit followed by removal. Only confirmed version conflicts allow reapplication. After inspecting the outcome, an operator can explicitly repeat with the printed ID:
 
 ```sh
 herdr-open README.md --on devbox --operation-id 0123456789abcdef0123456789abcdef
 ```
 
-Do not rerun with a new ID after an uncertain result if avoiding duplicates matters. Reusing an ID with different file/source/options is rejected. Readback confirms core state, **not desktop delivery or client focus**. Once an operation was acknowledged but absent on readback, the helper stops instead of blindly recreating it. This is not a durable exactly-once log; intentional removal and arbitrary concurrent client rewrites cannot be resolved with a hidden queue. Herdr's document is latest-state/no-merge shared state.
+Do not blindly rerun after an uncertain result, even with the same ID: a new process has no record of a previous operation that was later removed. Inspect the core state first; a fresh explicit invocation can create an absent pane. Reusing an ID with different file/source/options is rejected. Readback confirms core state, **not desktop delivery or client focus**. An acknowledged operation absent after failed readback/retry also stops without recreation. The no-recreation guard applies within this process; this is not a durable exactly-once log. Intentional removal and arbitrary concurrent client rewrites cannot be resolved with a hidden queue. Herdr's document is latest-state/no-merge shared state.
 
 ## Verification
 
