@@ -1,7 +1,7 @@
 node_modules/
 .cache/
 # Written into the mod folder by Herdr itself on every start
-mods/herdr-md/gpui-kit.d.ts
-mods/herdr-md/jsconfig.json
+mods/*/gpui-kit.d.ts
+mods/*/jsconfig.json
 .DS_Store
 HANDOFF.md
