@@ -98,6 +98,10 @@ class FakeCore:
                         if method == "hello":
                             self.send(conn, request, {"generation": 1, "core": {"version": "0.1.21"}})
                         elif method == "doc.get":
+                            if self.mode == "ack-removed" and self.sets == 1 and self.version == 2:
+                                self.value = document(); self.version += 1
+                                stream.close()
+                                break  # Acknowledged write, failed readback, concurrent removal.
                             if self.mode == "timeout":
                                 time.sleep(.15)
                             if self.mode == "oversize":
@@ -120,6 +124,7 @@ class FakeCore:
                             self.value = request["params"]["value"]
                             self.version += 1
                             if self.mode == "ambiguous" and self.sets == 1:
+                                stream.close()
                                 break  # Commit happened, response lost. Same op must be found.
                             self.send(conn, request, {"version": self.version})
                             if self.mode == "readback-missing":
@@ -204,6 +209,35 @@ class LayoutTests(unittest.TestCase):
         updated, _ = self.plan(value, new_tab=True)
         self.assertEqual(root(updated), root(value))
 
+    def test_effectively_hidden_ancestors_refused(self):
+        for hidden_kind in ("row", "column"):
+            value = document(); root(value)["type"] = hidden_kind; root(value)["hidden"] = True
+            with self.subTest(kind=hidden_kind), self.assertRaisesRegex(h.OpenError, "hidden"):
+                self.plan(value)
+
+    def test_recognized_content_requires_native_string_discriminator(self):
+        for content in ({"terminal": 17}, {"mod": None}, {"context": []}, {"agent": {}}, {"terminal": "t9", "mod": "x"}):
+            value = document(); root(value)["children"][1]["content"] = content
+            with self.subTest(content=content), self.assertRaisesRegex(h.OpenError, "content"):
+                self.plan(value)
+
+    def test_native_node_floats_are_indexed_for_source_and_id_conflicts(self):
+        for floating in ([{"id": "f1", "content": {"terminal": "t22"}}],
+                         [{"id": "p2", "content": {"terminal": "t7"}}],
+                         [{"id": "r" + OP, "content": {"terminal": "t7"}}]):
+            value = document(); root(value)["floating"] = floating
+            with self.subTest(floating=floating), self.assertRaises(h.OpenError):
+                self.plan(value)
+        value = document(); root(value)["children"].pop(0)
+        root(value)["floating"] = [{"id": "f1", "content": {"terminal": "t22"}}]
+        with self.assertRaisesRegex(h.OpenError, "floating"): self.plan(value)
+        with self.assertRaisesRegex(h.OpenError, "floating"): self.plan(value, new_tab=True)
+
+    def test_unrelated_native_floats_are_preserved(self):
+        value = document(); root(value)["floating"] = [{"id": "f1", "content": {"terminal": "t7"}, "bounds": [1, 2, 3, 4]}]
+        updated, _ = self.plan(value)
+        self.assertEqual(root(updated)["floating"], root(value)["floating"])
+
     def test_unknown_document_duplicate_ids_and_size_cap(self):
         with self.assertRaises(h.OpenError): self.plan({})
         value = document(); root(value)["children"][1]["id"] = "p1"
@@ -256,6 +290,13 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(h.OpenError, "absent on readback"): fake.open()
             self.assertEqual(fake.sets, 1)
 
+    def test_acknowledged_write_readback_disconnect_and_removal_never_recreates(self):
+        with FakeCore("ack-removed") as fake:
+            with self.assertRaisesRegex(h.OpenError, "Acknowledged operation.*absent"):
+                fake.open()
+            self.assertEqual(fake.sets, 1)
+            self.assertEqual(fake.value, document())
+
     def test_timeout_and_protocol_errors_are_bounded(self):
         for mode in ["timeout", "bad-envelope", "wrong-id", "oversize"]:
             with self.subTest(mode=mode), FakeCore(mode) as fake:
@@ -286,12 +327,22 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ho-doc-", dir="/tmp") as folder, FakeCore() as fake:
             pdf = Path(folder) / "a.pdf"; pdf.write_bytes(b"%PDF")
             binary = Path(folder) / "a.md"; binary.write_bytes(b"\0bad")
-            for path in [pdf, binary, Path(folder) / "missing.md", Path(folder)]:
+            truncated = Path(folder) / "truncated.md"; truncated.write_bytes(b"# hi\n\xe2\x82")
+            tail_binary = Path(folder) / "tail-binary.md"; tail_binary.write_bytes(b"a" * 9000 + b"\0")
+            tail_utf8 = Path(folder) / "tail-utf8.md"; tail_utf8.write_bytes(b"a" * 9000 + b"\xff")
+            huge = Path(folder) / "huge.md"
+            with huge.open("wb") as stream: stream.truncate(h.MAX_MARKDOWN + 1)
+            for path in [pdf, binary, truncated, tail_binary, tail_utf8, huge, Path(folder) / "missing.md", Path(folder)]:
                 with self.subTest(path=path):
                     completed = self.run_cli(path, fake)
                     self.assertNotEqual(completed.returncode, 0)
             self.assertEqual(fake.accepts, 0)
             self.assertEqual(fake.sets, 0)
+
+    def test_valid_multibyte_utf8_crossing_validation_chunk(self):
+        with tempfile.TemporaryDirectory(prefix="ho-doc-", dir="/tmp") as folder:
+            path = Path(folder) / "a.md"; path.write_bytes(b"a" * 65535 + "€\n".encode("utf-8"))
+            self.assertEqual(h.markdown_path(str(path)), str(path.resolve()))
 
     def test_explicit_operation_retry_and_overrides(self):
         with tempfile.TemporaryDirectory(prefix="ho-doc-", dir="/tmp") as folder, FakeCore() as fake:

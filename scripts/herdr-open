@@ -19,6 +19,7 @@ import uuid
 
 DOC_NAME = "herdr-app"
 MAX_DOCUMENT = 1024 * 1024
+MAX_MARKDOWN = 16 * 1024 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
 KINDS = {"row", "column", "stack", "block"}
 
@@ -122,11 +123,22 @@ def markdown_path(value):
             raise OpenError("Markdown only: PDF and other file types are unsupported")
         if any(c in str(path) for c in "\0\r\n"):
             raise OpenError("Markdown path contains unsupported control characters")
+        if path.stat().st_size > MAX_MARKDOWN:
+            raise OpenError("Markdown exceeds 16MiB validation limit")
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        total = 0
         with path.open("rb") as stream:
-            sample = stream.read(8192)
-        if b"\0" in sample:
-            raise OpenError("Markdown sample contains binary data")
-        codecs.getincrementaldecoder("utf-8")().decode(sample, final=False)
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    decoder.decode(b"", final=True)  # Reject incomplete UTF-8 at EOF.
+                    break
+                total += len(chunk)
+                if total > MAX_MARKDOWN:
+                    raise OpenError("Markdown exceeds 16MiB validation limit")
+                if b"\0" in chunk:
+                    raise OpenError("Markdown contains binary data")
+                decoder.decode(chunk, final=False)
         return str(path)
     except (OSError, UnicodeError, RuntimeError) as error:
         raise OpenError("Cannot read local Markdown: %s" % error)
@@ -142,7 +154,12 @@ def inspect_document(value):
         raise OpenError("Unknown herdr-app document: expected spaces list; refusing to initialize/reset")
     nodes, tabs, spaces = {}, set(), set()
 
-    def walk(node, space, tab, parent, stack, floating=False):
+    def content_ok(content):
+        keys = [key for key in ("terminal", "mod", "context", "agent") if isinstance(content, dict) and key in content]
+        if len(keys) != 1 or not ident(content[keys[0]]):
+            raise OpenError("Unknown/malformed native block content")
+
+    def walk(node, space, tab, parent, stack, hidden=False):
         if not isinstance(node, dict) or node.get("type") not in KINDS or not ident(node.get("id")):
             raise OpenError("Unknown native layout node; refusing structural edit")
         if node["id"] in nodes:
@@ -154,17 +171,30 @@ def inspect_document(value):
             n = next(iter(size.values()))
             if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) or n <= 0:
                 raise OpenError("Invalid native pane size")
-        nodes[node["id"]] = (node, space, tab, parent, stack, floating)
+        if "hidden" in node and type(node["hidden"]) is not bool:
+            raise OpenError("Invalid native hidden flag")
+        hidden = hidden or node.get("hidden", False)
+        nodes[node["id"]] = (node, space, tab, parent, stack, False, hidden)
+        # Native floats are flat {id,content,...} entries on EACH node, not
+        # tab.floating[].node. Include them in collision/source validation.
+        floats = node.get("floating", [])
+        if not isinstance(floats, list):
+            raise OpenError("Unknown native floating layout")
+        for item in floats:
+            if not isinstance(item, dict) or not ident(item.get("id")):
+                raise OpenError("Unknown native floating pane")
+            if item["id"] in nodes:
+                raise OpenError("Duplicate native pane/node ID")
+            content_ok(item.get("content"))
+            nodes[item["id"]] = (item, space, tab, None, stack, True, hidden)
         if node["type"] == "block":
-            content = node.get("content")
-            if not isinstance(content, dict) or not any(k in content for k in ("terminal", "mod", "context", "agent")):
-                raise OpenError("Unknown native block content")
+            content_ok(node.get("content"))
         else:
             children = node.get("children")
             if not isinstance(children, list) or not children:
                 raise OpenError("Unknown/empty native container")
             for child in children:
-                walk(child, space, tab, node, stack or node["type"] == "stack", floating)
+                walk(child, space, tab, node, stack or node["type"] == "stack", hidden)
 
     for space in value["spaces"]:
         if not isinstance(space, dict) or not ident(space.get("id")) or space["id"] in spaces or not isinstance(space.get("tabs"), list):
@@ -175,13 +205,8 @@ def inspect_document(value):
                 raise OpenError("Unknown/duplicate native tab")
             tabs.add(tab["id"])
             walk(tab["root"], space, tab, None, False)
-            floats = tab.get("floating", [])
-            if not isinstance(floats, list):
-                raise OpenError("Unknown native floating layout")
-            for item in floats:
-                if not isinstance(item, dict) or "node" not in item:
-                    raise OpenError("Unknown native floating pane")
-                walk(item["node"], space, tab, None, False, True)
+            if "floating" in tab:
+                raise OpenError("Unsupported tab-level floating representation")
     return nodes
 
 
@@ -193,7 +218,7 @@ def plan_open(value, path, on, terminal, operation_id, new_tab=False):
     content = {"mod": "herdr-md", "props": {"file": path, "on": on,
                "herdr_open": {"operation_id": operation_id, "terminal": terminal, "new_tab": new_tab}}}
     if pane_id in nodes:
-        node, space, tab, _, _, _ = nodes[pane_id]
+        node, space, tab, _, _, _, _ = nodes[pane_id]
         if node.get("content") != content:
             raise OpenError("Operation ID already exists with different arguments/content")
         return document, {"operation_id": operation_id, "pane_id": pane_id, "tab_id": tab["id"], "space_id": space["id"], "reused": True}
@@ -202,8 +227,8 @@ def plan_open(value, path, on, terminal, operation_id, new_tab=False):
     sources = [entry for entry in nodes.values() if entry[0].get("content", {}).get("terminal") == terminal]
     if len(sources) != 1:
         raise OpenError("Expected exactly one source terminal pane; found %d" % len(sources))
-    source, space, tab, parent, in_stack, floating = sources[0]
-    if floating or (in_stack and not new_tab) or source.get("hidden"):
+    source, space, tab, parent, in_stack, floating, hidden = sources[0]
+    if floating or (in_stack and not new_tab) or hidden:
         raise OpenError("Source is floating, stacked or hidden; use a normal pane (--new-tab supports stacks)")
     pane = {"type": "block", "id": pane_id, "content": content}
     if new_tab:
@@ -239,6 +264,7 @@ def plan_open(value, path, on, terminal, operation_id, new_tab=False):
 
 def open_document(socket_path, terminal, path, on, operation_id, new_tab=False, retries=3, timeout=3, client_factory=Core):
     last_error = None
+    acknowledged = False
     for _ in range(retries + 1):
         try:
             with client_factory(socket_path, timeout) as core:
@@ -250,7 +276,10 @@ def open_document(socket_path, terminal, path, on, operation_id, new_tab=False, 
                     raise OpenError("Invalid core document version")
                 updated, result = plan_open(snapshot.get("value"), path, on, terminal, operation_id, new_tab)
                 if not result["reused"]:
+                    if acknowledged:
+                        raise OpenError("Acknowledged operation is absent after retry; refusing recreation")
                     core.rpc("doc.set", {"name": DOC_NAME, "version": snapshot["version"], "value": updated})
+                    acknowledged = True
                     verified = core.rpc("doc.get", {"name": DOC_NAME})
                     if not isinstance(verified, dict) or type(verified.get("version")) is not int:
                         raise OpenError("Invalid layout readback")
