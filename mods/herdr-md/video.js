@@ -12,7 +12,7 @@ function play(st, on, n, now, rewind = true) {
   return { i, playing: on, t0: now - i * 1000 / VIDEO_FPS };
 }
 
-// A command from the viewer (Enter, a click, mdh video): { state: toggle|play|pause|seek, t? }.
+// A command from the viewer (Enter, a click, annotation file): { state: toggle|play|pause|seek, t? }.
 // `n` is the clip's frame count. Returns the new state.
 export function command(st, c, n, now) {
   if (!n) return st;

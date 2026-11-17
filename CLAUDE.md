@@ -1,13 +1,13 @@
 # herdr-md
 
-A Herdr desktop-app mod (gpui-kit JavaScript, no DOM) plus the `mdh` CLI.
+Herdr desktop-app mods (gpui-kit JavaScript, no DOM): a native Markdown reader and a clipboard context menu.
 Herdr's own docs are the truth: `~/.config/herdr-app/AGENTS.md`, `gpui-kit.d.ts`, `herdr.d.ts`.
 
 ## Dev loop
 
 1. Edit in `mods/herdr-md/`.
 2. `scripts/dev-sync.sh` copies it into `~/.config/herdr-app/mods/herdr-md` and runs `herdr-app check`; Herdr hot-reloads open viewers.
-3. Look: `herdr-app shot <png>`; drive: `mdh …`, `herdr-app do …`, theGrid key presses. Never declare a change done from `herdr-app check` alone.
+3. Look: `herdr-app shot <png>`; test the actual clipboard → terminal context-menu → preview gesture. Use `herdr-app do …` for host checks. Never declare a change done from `herdr-app check` alone.
 
 ## Gotchas (all hit for real)
 

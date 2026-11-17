@@ -1,7 +1,7 @@
 # A tour of herdr-md
 
 Markdown rendered in a Herdr pane, read with vim keys. Open this file with
-`mdh open demo/tour.md`, then press `o` for the outline or `?` for every key.
+Open this file through the clipboard Markdown menu, then press `o` for the outline or `?` for every key.
 
 > [!NOTE]
 > Everything here is drawn natively: real font sizes, your theme's colors,
@@ -51,16 +51,14 @@ Minimizing :eqref:`eq_loss` gives the best line through the data.
 flowchart LR
   A[Edit a doc] --> B{herdr-md}
   B -->|diff| C[Changed blocks marked]
-  B -->|mdh hl| D[Highlight + note]
+  B -->|local notes| D[Highlight + note]
   C --> E[You read only what changed]
   D --> E
 ```
 
-## Pinning for your agent
+## Changes and selection
 
-Select a few blocks with `V` and `j`, press `p` to pin them, then ask your agent
-"what about this?" It runs `mdh sel` and sees exactly what you meant:
-the file, the line range and the markdown source.
+Select a few blocks with `V` and `j`, then press `y` to copy their Markdown source.
 
 And when the agent rewrites part of a doc, the blocks it touched get a mark in
 the gutter, so you only reread what changed.

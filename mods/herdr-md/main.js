@@ -3,7 +3,7 @@
 // Blocks are native elements (real font sizes and colors); inline runs go
 // through TextView.markdown, which inherits size and font from its parent.
 //
-// Annotations: the `mdh` script (next to this file) writes
+// Local annotation-file protocol:
 // ~/.cache/herdr-md/<file-key>.json = { seq, focus, highlights: [{lines:[a,b]} | {text}, note?, color?] }.
 // The viewer watches that folder, tints the matching blocks, shows notes under
 // them and scrolls to `focus` whenever `seq` changes.
@@ -180,7 +180,7 @@ export default class Md extends View {
     this.pickInput.on("submit", (_e, cx) => this.pickOpen(cx));
     this.pickInput.on("focus", () => { this.pickTyping = true; });
     this.pickInput.on("blur", () => { this.pickTyping = false; });
-    // An empty viewer (no file) can start in the picker: `mdh pick` with no viewer
+    // An empty viewer (no file) can start in the picker when requested
     // open passes { pick: true, dir: <shell cwd> }; the cmd-shift-o key passes no dir.
     // Without one it roots at the focused terminal's folder (read now: the new
     // pane takes focus right after), else at the newest recent file's, else home.
@@ -198,7 +198,7 @@ export default class Md extends View {
     cx.spawn(async cx => {
       for (;;) {
         const c = await nextCommand();
-        // `mdh pick` (herdr-app do herdr-md.pick): the focused viewer opens its
+        // A picker command opens the focused viewer's
         // picker; with no viewer focused, the only viewer does (and takes focus).
         if (c === "pick") {
           // Shown copies hear it (viewers in other tabs don't), so "the only one"
@@ -451,7 +451,7 @@ export default class Md extends View {
     let n = null;
     try { n = JSON.parse(await readTextFile(`${NOTES()}/${noteKey(this.file)}`) ?? "null"); } catch {}
     this.notes = n && Array.isArray(n.highlights) ? n : { highlights: [] };
-    // A video command (mdh video) has its own seq. One written before this viewer
+    // A video command has its own seq. One written before this viewer
     // opened is stale and ignored.
     const vc = n?.video;
     if (vc && vc.seq !== this.videoSeq) { this.videoSeq = vc.seq; if (vc.seq > this.born) { this.pendingVideo = vc; this.applyVideo(cx); } }
@@ -477,7 +477,7 @@ export default class Md extends View {
     });
   }
 
-  // Jump to the highlight the last `mdh` call asked for, once the document is loaded.
+  // Jump to the requested annotation highlight once the document is loaded.
   applyFocus() {
     if (this.pendingFocus === null || !this.blocks.length) return;
     this.aimAt(this.notes.highlights[this.pendingFocus]?.blocks?.[0]); this.pendingFocus = null; this.highlightAimed = true;
@@ -606,7 +606,7 @@ export default class Md extends View {
   // forced and the same protocol whitelist. Paths reach sh as "$1"/"$2"
   // arguments, never spliced into the script.
   // On open: probe and a poster frame only. Frames are extracted on first play.
-  // this.videoList is document order (mdh video N).
+  // this.videoList is document order.
   async loadVideos(tokens, cx) {
     const hrefs = [];
     marked.walkTokens(tokens, tok => { if (tok.type === "image" && isVideo(tok.href)) hrefs.push(tok.href); });
@@ -1196,7 +1196,7 @@ export default class Md extends View {
   // preview on the right drawn by block(). Files: markdown under the git work
   // tree (tracked + untracked, not ignored), else under this folder; see picker.js.
 
-  // Newest first in ~/.cache/herdr-md/recent.json (read by the picker and `mdh pick`).
+  // Newest first in ~/.cache/herdr-md/recent.json (read by the picker).
   async remember(file) {
     if (!file || this.remote) return;
     let list = [];
@@ -1631,7 +1631,7 @@ export default class Md extends View {
 
   yank() { const { text } = this.selection(); exec("sh", ["-c", 'printf %s "$1" | LANG=en_US.UTF-8 pbcopy', "yank", text]); this.flash = "copied"; }
 
-  // Pin the selection for Claude: `mdh sel` prints it.
+  // Pin the local selection in the annotation-file protocol.
   share() {
     if (this.remote) { this.flash = "Remote agent annotations/pins disabled; y still copies Markdown"; return; }
     const sel = this.selection();

@@ -8,7 +8,7 @@ annotate the document alongside you.
 flowchart LR
   A[Agent edits a doc] --> B{herdr-md}
   B -->|diff| C[Changed blocks marked]
-  B -->|mdh hl| D[Highlight + note]
+  B -->|local notes| D[Highlight + note]
   C --> E[You reread only what changed]
   D --> E
 ```

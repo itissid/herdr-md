@@ -12,6 +12,6 @@ Press Enter on an image or a diagram to zoom it: `hjkl` or drag to pan, `+` `-` 
 
 ## A video
 
-Enter plays and pauses it, `O` opens it in QuickTime. An agent can drive it too: `mdh video demo/media.md play`.
+For local files, Enter plays and pauses it; `O` opens it in QuickTime. Remote media is deliberately disabled.
 
 ![Gradient descent, step by step](fit.mp4)
