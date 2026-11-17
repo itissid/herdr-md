@@ -1,5 +1,9 @@
 # Remote Markdown from the Mac
 
+**Devbox-native opening is now available:** see [NATIVE-OPEN.md](NATIVE-OPEN.md)
+for `herdr-open README.md --on devbox`, a one-shot client of the existing local
+core. The Mac-side `mdh` workflow below remains compatible, not mandatory.
+
 This fork runs the native viewer in **Herdr Desktop on the Mac**. Herdr's existing machine connection reads the file from `devbox`; no viewer, npm install, file mirror, or public socket is needed on devbox.
 
 ## Open next to Pi
@@ -18,7 +22,7 @@ The equivalent supported app command is:
 herdr-app do pane.split '{"pane":"devbox/PANE_ID","direction":"right","mod":"herdr-md","props":{"file":"/home/dev/workspace/project/README.md","on":"devbox"}}'
 ```
 
-The CLI and app socket are Mac-local. A devbox Pi session does **not** automatically run this command on the Mac. For now, ask the Mac agent over the existing mesh to invoke it. A durable automatic bridge and terminal Cmd-click interception are separate work; this fork installs neither and exposes no TCP socket.
+The `mdh` CLI and app socket are Mac-local; a devbox Pi session does **not** automatically run that Mac command. Alternatively, the new devbox-side `herdr-open` uses the **existing native local-core API and shared layout** to request the pane, without a Mac agent, new SSH or bespoke relay. An already-connected desktop still needs the renderer installed. Terminal Cmd-click interception remains separate; neither workflow exposes a TCP socket.
 
 ## Refresh and navigation
 

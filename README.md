@@ -1,9 +1,11 @@
 # herdr-md
 
-**This fork adds Mac-side remote devbox viewing.** See [REMOTE.md](REMOTE.md)
-for `mdh open FILE --on devbox --pane devbox/PANE_ID`, refresh behavior,
-installation, verification and deliberate remote-mode limitations. Diagram npm
-installation is opt-in in this fork; the upstream overview below describes the
+**This fork adds remote devbox viewing and a native one-shot opener.**
+Run `herdr-open README.md --on devbox` inside devbox Pi to request a preview
+through the existing core connection—no Mac CLI, new SSH or standalone service.
+See [NATIVE-OPEN.md](NATIVE-OPEN.md) for setup, native-state caveats and limits.
+[REMOTE.md](REMOTE.md) documents the renderer and compatible Mac-side `mdh`.
+Diagram npm installation is opt-in; the upstream overview below describes the
 full local reader.
 
 Finally, markdown and the terminal done right: a native markdown pane for the
